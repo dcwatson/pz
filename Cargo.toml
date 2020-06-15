@@ -1,0 +1,22 @@
+[package]
+name = "pzip"
+version = "0.1.0"
+authors = ["Dan Watson <dcwatson@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+clap = "~2.33.0"
+hex = "~0.4.2"
+hkdf = "0.9.0-alpha.0"
+pbkdf2 = { version = "~0.4.0", default-features = false }
+sha2 = "~0.9.0"
+hmac = "~0.8.0"
+aes-gcm = "~0.6.0"
+
+[lib]
+name = "pzip"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pz"
+path = "src/main.rs"
