@@ -1,4 +1,5 @@
 use ring::{aead, error::Unspecified, pbkdf2};
+use std::cmp;
 use std::io;
 use std::num::NonZeroU32;
 
@@ -11,7 +12,7 @@ pub enum Error {
     InvalidNonceSize(u8),
     InvalidIterations(u32),
     NonceExhaustion,
-    EncryptionError(Unspecified),
+    CryptoError(Unspecified),
 }
 
 impl From<io::Error> for Error {
@@ -22,9 +23,11 @@ impl From<io::Error> for Error {
 
 impl From<Unspecified> for Error {
     fn from(error: Unspecified) -> Self {
-        Error::EncryptionError(error)
+        Error::CryptoError(error)
     }
 }
+
+const DEFAULT_BLOCK_SIZE: usize = 262144;
 
 const FLAG_COMPRESSED: u8 = 1 << 0;
 const FLAG_PASSWORD: u8 = 1 << 1;
@@ -128,6 +131,7 @@ impl PZip {
             },
             reader: reader,
             counter: 0,
+            buffer: Vec::<u8>::with_capacity(DEFAULT_BLOCK_SIZE),
         });
     }
 
@@ -151,6 +155,7 @@ pub struct PZipReader<'a, T: io::Read> {
     pzip: PZip,
     reader: &'a mut T,
     counter: u32,
+    buffer: Vec<u8>,
 }
 
 impl<'a, T: io::Read> PZipReader<'a, T> {
@@ -182,9 +187,42 @@ impl<'a, T: io::Read> Iterator for PZipReader<'a, T> {
     }
 }
 
+impl<'a, T: io::Read> io::Read for PZipReader<'a, T> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        while self.buffer.len() < buf.len() {
+            match self.read_block() {
+                Ok(b) => {
+                    self.buffer.extend(b);
+                }
+                Err(Error::CryptoError(_)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "error decrypting data",
+                    ));
+                }
+                _ => break,
+            }
+        }
+
+        let amt = cmp::min(buf.len(), self.buffer.len());
+        if buf.len() <= self.buffer.len() {
+            let (left, right) = self.buffer.split_at(buf.len());
+            buf.copy_from_slice(left);
+            self.buffer = right.to_vec();
+        } else if !self.buffer.is_empty() {
+            for (idx, b) in self.buffer.drain(0..).enumerate() {
+                buf[idx] = b;
+            }
+        }
+
+        Ok(amt)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     // Test archive from https://github.com/imsweb/pzip
     const TEST_DATA: &str = "505A49500102200C086F58741C96B2C27A8DA2716422702A00030D40000000000000000B9266AEA55A27210430B6086F000000152D9C7FF9665B9C444C78DA54E0529422035CC1FD930000001682E078BEFEA66C5BA96A066979E8506D27C3610B2F8E";
@@ -220,5 +258,23 @@ mod tests {
             plaintext.extend(block);
         }
         assert_eq!(plaintext, b"hello world");
+    }
+
+    #[test]
+    fn test_read() {
+        let data = hex::decode(TEST_DATA).unwrap();
+        let mut reader = io::BufReader::new(&data[..]);
+        let mut f = PZip::from(&mut reader, b"pzip").expect("failed to read header");
+        let mut buf = vec![0u8; 4];
+        f.read_exact(&mut buf)
+            .expect("failed to read first 4 bytes");
+        assert_eq!(buf, b"hell");
+        buf.truncate(3);
+        f.read_exact(&mut buf).expect("failed to read next 3 bytes");
+        assert_eq!(buf, b"o w");
+        buf.resize(20, 0);
+        let amt = f.read(&mut buf).expect("failed to read last 4 bytes");
+        assert_eq!(amt, 4);
+        assert_eq!(&buf[..amt], b"orld");
     }
 }
