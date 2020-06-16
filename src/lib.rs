@@ -40,7 +40,6 @@ pub struct PZip {
     size: u64,
     nonce: [u8; 12],
     key: aead::LessSafeKey,
-    counter: u32,
 }
 
 impl PZip {
@@ -52,7 +51,10 @@ impl PZip {
         self.flags & FLAG_PASSWORD != 0
     }
 
-    pub fn from<T: io::Read>(reader: &mut T, key_material: &[u8]) -> Result<PZip, Error> {
+    pub fn from<'r, T: io::Read>(
+        reader: &'r mut T,
+        key_material: &[u8],
+    ) -> Result<PZipReader<'r, T>, Error> {
         let mut buf = [0u8; 36];
         reader.read_exact(&mut buf)?;
 
@@ -112,27 +114,30 @@ impl PZip {
         };
         let raw = aead::UnboundKey::new(algorithm, &key_bytes)?;
 
-        return Ok(PZip {
-            version: version,
-            flags: flags,
-            key_size: key_size,
-            nonce_size: nonce_size,
-            salt: salt,
-            iterations: iterations,
-            size: size,
-            nonce: nonce,
-            key: aead::LessSafeKey::new(raw),
+        return Ok(PZipReader {
+            pzip: PZip {
+                version: version,
+                flags: flags,
+                key_size: key_size,
+                nonce_size: nonce_size,
+                salt: salt,
+                iterations: iterations,
+                size: size,
+                nonce: nonce,
+                key: aead::LessSafeKey::new(raw),
+            },
+            reader: reader,
             counter: 0,
         });
     }
 
-    pub fn current_nonce(&self) -> Result<aead::Nonce, Error> {
-        if self.counter == u32::MAX {
+    pub fn block_nonce(&self, counter: u32) -> Result<aead::Nonce, Error> {
+        if counter == u32::MAX {
             return Err(Error::NonceExhaustion);
         }
 
         let mut next = self.nonce.clone();
-        let ctr = self.counter.to_be_bytes();
+        let ctr = counter.to_be_bytes();
         next[8] ^= ctr[0];
         next[9] ^= ctr[1];
         next[10] ^= ctr[2];
@@ -140,17 +145,26 @@ impl PZip {
 
         Ok(aead::Nonce::assume_unique_for_key(next))
     }
+}
 
-    pub fn read_block<T: io::Read>(&mut self, reader: &mut T) -> Result<Vec<u8>, Error> {
+pub struct PZipReader<'a, T: io::Read> {
+    pzip: PZip,
+    reader: &'a mut T,
+    counter: u32,
+}
+
+impl<'a, T: io::Read> PZipReader<'a, T> {
+    pub fn read_block(&mut self) -> Result<Vec<u8>, Error> {
         let mut header = [0u8; 4];
-        reader.read_exact(&mut header)?;
+        self.reader.read_exact(&mut header)?;
         let size = u32::from_be_bytes(header);
 
         let mut block = vec![0u8; size as usize];
-        reader.read_exact(&mut block)?;
+        self.reader.read_exact(&mut block)?;
 
-        let nonce = self.current_nonce()?;
+        let nonce = self.pzip.block_nonce(self.counter)?;
         let plaintext = self
+            .pzip
             .key
             .open_in_place(nonce, aead::Aad::empty(), &mut block)?;
 
@@ -158,25 +172,13 @@ impl PZip {
 
         Ok(plaintext.to_vec())
     }
-
-    pub fn blocks<'a, T: io::Read>(&'a mut self, reader: &'a mut T) -> BlockIter<T> {
-        BlockIter {
-            pzip: self,
-            reader: reader,
-        }
-    }
 }
 
-pub struct BlockIter<'a, T: io::Read> {
-    pzip: &'a mut PZip,
-    reader: &'a mut T,
-}
-
-impl<'a, T: io::Read> Iterator for BlockIter<'a, T> {
+impl<'a, T: io::Read> Iterator for PZipReader<'a, T> {
     type Item = Vec<u8>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.pzip.read_block(&mut self.reader).ok()
+        self.read_block().ok()
     }
 }
 
@@ -191,20 +193,20 @@ mod tests {
     fn test_pzip_from() {
         let data = hex::decode(TEST_DATA).unwrap();
         let mut reader = io::BufReader::new(&data[..]);
-        let mut pzip = PZip::from(&mut reader, b"pzip").expect("failed to read header");
-        assert_eq!(pzip.version, 1);
-        assert_eq!(pzip.is_compressed(), false);
-        assert_eq!(pzip.is_password_key(), true);
-        assert_eq!(pzip.key_size, 32);
-        assert_eq!(pzip.nonce_size, 12);
-        assert_eq!(pzip.salt.len(), 16);
-        assert_eq!(pzip.iterations, 200000);
-        assert_eq!(pzip.size, 11);
+        let mut f = PZip::from(&mut reader, b"pzip").expect("failed to read header");
+        assert_eq!(f.pzip.version, 1);
+        assert_eq!(f.pzip.is_compressed(), false);
+        assert_eq!(f.pzip.is_password_key(), true);
+        assert_eq!(f.pzip.key_size, 32);
+        assert_eq!(f.pzip.nonce_size, 12);
+        assert_eq!(f.pzip.salt.len(), 16);
+        assert_eq!(f.pzip.iterations, 200000);
+        assert_eq!(f.pzip.size, 11);
 
-        let block1 = pzip.read_block(&mut reader).expect("failed to read block");
+        let block1 = f.read_block().expect("failed to read block");
         assert_eq!(block1, b"hello");
 
-        let block2 = pzip.read_block(&mut reader).expect("failed to read block");
+        let block2 = f.read_block().expect("failed to read block");
         assert_eq!(block2, b" world");
     }
 
@@ -212,9 +214,9 @@ mod tests {
     fn test_block_iter() {
         let data = hex::decode(TEST_DATA).unwrap();
         let mut reader = io::BufReader::new(&data[..]);
-        let mut pzip = PZip::from(&mut reader, b"pzip").expect("failed to read header");
+        let f = PZip::from(&mut reader, b"pzip").expect("failed to read header");
         let mut plaintext = Vec::<u8>::with_capacity(11);
-        for block in pzip.blocks(&mut reader) {
+        for block in f {
             plaintext.extend(block);
         }
         assert_eq!(plaintext, b"hello world");
