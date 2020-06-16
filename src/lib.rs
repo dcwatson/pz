@@ -1,18 +1,17 @@
-use aes_gcm::aead::{generic_array::GenericArray, AeadInPlace, Error as AeadError, NewAead};
-use aes_gcm::Aes256Gcm;
-use hkdf::Hkdf;
-use hmac::Hmac;
-use pbkdf2::pbkdf2;
-use sha2::Sha256;
+use ring::{aead, error::Unspecified, pbkdf2};
 use std::io;
+use std::num::NonZeroU32;
 
 #[derive(Debug)]
 pub enum Error {
     IoError(io::Error),
-    IncorrectMagic(Vec<u8>),
+    IncorrectMagic([u8; 4]),
     UnknownVersion(u8),
     InvalidKeySize(u8),
-    EncryptionError(AeadError),
+    InvalidNonceSize(u8),
+    InvalidIterations(u32),
+    NonceExhaustion,
+    EncryptionError(Unspecified),
 }
 
 impl From<io::Error> for Error {
@@ -21,8 +20,8 @@ impl From<io::Error> for Error {
     }
 }
 
-impl From<AeadError> for Error {
-    fn from(error: AeadError) -> Self {
+impl From<Unspecified> for Error {
+    fn from(error: Unspecified) -> Self {
         Error::EncryptionError(error)
     }
 }
@@ -36,11 +35,11 @@ pub struct PZip {
     flags: u8,
     key_size: u8,
     nonce_size: u8,
-    salt: Vec<u8>,
+    salt: [u8; 16],
     iterations: u32,
     size: u64,
-    nonce: Vec<u8>,
-    key: Vec<u8>,
+    nonce: [u8; 12],
+    key: aead::LessSafeKey,
     counter: u32,
 }
 
@@ -57,8 +56,9 @@ impl PZip {
         let mut buf = [0u8; 36];
         reader.read_exact(&mut buf)?;
 
-        let magic = buf[0..4].to_vec();
-        if magic != b"PZIP" {
+        let mut magic = [0u8; 4];
+        magic.copy_from_slice(&buf[0..4]);
+        if &magic != b"PZIP" {
             return Err(Error::IncorrectMagic(magic));
         }
 
@@ -69,24 +69,48 @@ impl PZip {
 
         let flags = buf[5];
         let key_size = buf[6];
-        if ![16u8, 24u8, 32u8].contains(&key_size) {
+        if ![16u8, 32u8].contains(&key_size) {
             return Err(Error::InvalidKeySize(key_size));
         }
 
         let nonce_size = buf[7];
-        let mut nonce = vec![0u8; nonce_size as usize];
+        if nonce_size != 12 {
+            return Err(Error::InvalidNonceSize(nonce_size));
+        }
+
+        let mut salt = [0u8; 16];
+        salt.copy_from_slice(&buf[8..24]);
+
+        let iterations = u32::from_be_bytes([buf[24], buf[25], buf[26], buf[27]]);
+        if iterations < 1 {
+            return Err(Error::InvalidIterations(iterations));
+        }
+
+        let size = u64::from_be_bytes([
+            buf[28], buf[29], buf[30], buf[31], buf[32], buf[33], buf[34], buf[35],
+        ]);
+
+        let mut nonce = [0u8; 12];
         reader.read_exact(&mut nonce)?;
 
-        let salt = buf[8..24].to_vec();
-        let iterations = u32::from_be_bytes([buf[24], buf[25], buf[26], buf[27]]);
-
-        let mut key = vec![0u8; key_size as usize];
+        let mut key_bytes = vec![0u8; key_size as usize];
         if flags & FLAG_PASSWORD != 0 {
-            pbkdf2::<Hmac<Sha256>>(&key_material, &salt, iterations, &mut key);
+            pbkdf2::derive(
+                pbkdf2::PBKDF2_HMAC_SHA256,
+                NonZeroU32::new(iterations).unwrap(),
+                &salt,
+                &key_material,
+                &mut key_bytes,
+            );
         } else {
-            let h = Hkdf::<Sha256>::new(Some(&salt), &key_material);
-            h.expand(&[], &mut key).unwrap();
         }
+
+        let algorithm = if key_size == 16 {
+            &aead::AES_128_GCM
+        } else {
+            &aead::AES_256_GCM
+        };
+        let raw = aead::UnboundKey::new(algorithm, &key_bytes)?;
 
         return Ok(PZip {
             version: version,
@@ -95,23 +119,26 @@ impl PZip {
             nonce_size: nonce_size,
             salt: salt,
             iterations: iterations,
-            size: u64::from_be_bytes([
-                buf[28], buf[29], buf[30], buf[31], buf[32], buf[33], buf[34], buf[35],
-            ]),
+            size: size,
             nonce: nonce,
-            key: key,
+            key: aead::LessSafeKey::new(raw),
             counter: 0,
         });
     }
 
-    fn current_nonce(&self) -> Vec<u8> {
+    pub fn current_nonce(&self) -> Result<aead::Nonce, Error> {
+        if self.counter == u32::MAX {
+            return Err(Error::NonceExhaustion);
+        }
+
         let mut next = self.nonce.clone();
         let ctr = self.counter.to_be_bytes();
-        for i in 0..4 {
-            let idx = (self.nonce_size - 4 + i) as usize;
-            next[idx] ^= ctr[i as usize];
-        }
-        return next;
+        next[8] ^= ctr[0];
+        next[9] ^= ctr[1];
+        next[10] ^= ctr[2];
+        next[11] ^= ctr[3];
+
+        Ok(aead::Nonce::assume_unique_for_key(next))
     }
 
     pub fn read_block<T: io::Read>(&mut self, reader: &mut T) -> Result<Vec<u8>, Error> {
@@ -122,15 +149,14 @@ impl PZip {
         let mut block = vec![0u8; size as usize];
         reader.read_exact(&mut block)?;
 
-        let next = self.current_nonce();
-        let aeskey = GenericArray::from_slice(&self.key);
-        let nonce = GenericArray::from_slice(&next);
-        let cipher = Aes256Gcm::new(aeskey);
-        cipher.decrypt_in_place(nonce, &[], &mut block)?;
+        let nonce = self.current_nonce()?;
+        let plaintext = self
+            .key
+            .open_in_place(nonce, aead::Aad::empty(), &mut block)?;
 
         self.counter += 1;
 
-        Ok(block)
+        Ok(plaintext.to_vec())
     }
 }
 
@@ -138,6 +164,7 @@ impl PZip {
 mod tests {
     use super::*;
 
+    // Test archive from https://github.com/imsweb/pzip
     const TEST_DATA: &str = "505A49500102200C086F58741C96B2C27A8DA2716422702A00030D40000000000000000B9266AEA55A27210430B6086F000000152D9C7FF9665B9C444C78DA54E0529422035CC1FD930000001682E078BEFEA66C5BA96A066979E8506D27C3610B2F8E";
 
     #[test]
