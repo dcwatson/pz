@@ -212,16 +212,37 @@ impl PZip {
         Ok(aead::Nonce::assume_unique_for_key(next))
     }
 
-    pub fn decrypt<'r, T: io::Read>(
-        reader: &'r mut T,
+    pub fn decrypt<R: io::Read, W: io::Write>(
+        input: &mut R,
+        output: &mut W,
         key_material: &[u8],
-    ) -> Result<Vec<u8>, Error> {
-        let r = PZip::from(reader, key_material)?;
-        let mut data = Vec::<u8>::with_capacity(r.pzip.size as usize);
+    ) -> Result<usize, Error> {
+        let r = PZip::from(input, key_material)?;
+        let mut total: usize = 0;
         for block in r {
-            data.extend(block);
+            total += block.len();
+            output.write_all(&block)?;
         }
-        Ok(data)
+        Ok(total)
+    }
+
+    pub fn encrypt<R: io::Read, W: io::Write>(
+        input: &mut R,
+        output: &mut W,
+        key_material: &[u8],
+    ) -> Result<usize, Error> {
+        let mut w = PZip::new(output, key_material)?;
+        let mut chunk = [0u8; DEFAULT_BLOCK_SIZE];
+        let mut total: usize = 0;
+        loop {
+            let amt = input.read(&mut chunk)?;
+            if amt < 1 {
+                break;
+            }
+            w.write_block(&chunk[..amt])?;
+            total += amt;
+        }
+        Ok(total)
     }
 }
 
@@ -418,10 +439,6 @@ mod tests {
         w.write_block(plaintext).expect("failed to write block");
 
         let mut s = &buf[..];
-        let check = PZip::decrypt(&mut s, b"pzip").expect("could not decrypt pzip archive");
-        assert_eq!(check, plaintext);
-
-        let mut s = &buf[..];
         let mut r = PZip::from(&mut s, b"pzip").expect("failed to read header");
 
         assert_eq!(r.pzip.version, 1);
@@ -433,6 +450,18 @@ mod tests {
         assert_eq!(r.pzip.iterations, 0);
 
         let check = r.read_block().expect("failed to read block");
+        assert_eq!(check, plaintext);
+    }
+
+    #[test]
+    fn test_one_shot() {
+        let plaintext = b"hello world";
+        let mut ciphertext = Vec::<u8>::new();
+        let mut check = Vec::<u8>::new();
+        PZip::encrypt(&mut io::Cursor::new(plaintext), &mut ciphertext, b"pzip")
+            .expect("encrypt failed");
+        PZip::decrypt(&mut io::Cursor::new(ciphertext), &mut check, b"pzip")
+            .expect("decrypt failed");
         assert_eq!(check, plaintext);
     }
 }
