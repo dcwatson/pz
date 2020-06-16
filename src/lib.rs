@@ -158,6 +158,26 @@ impl PZip {
 
         Ok(plaintext.to_vec())
     }
+
+    pub fn blocks<'a, T: io::Read>(&'a mut self, reader: &'a mut T) -> BlockIter<T> {
+        BlockIter {
+            pzip: self,
+            reader: reader,
+        }
+    }
+}
+
+pub struct BlockIter<'a, T: io::Read> {
+    pzip: &'a mut PZip,
+    reader: &'a mut T,
+}
+
+impl<'a, T: io::Read> Iterator for BlockIter<'a, T> {
+    type Item = Vec<u8>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.pzip.read_block(&mut self.reader).ok()
+    }
 }
 
 #[cfg(test)]
@@ -186,5 +206,17 @@ mod tests {
 
         let block2 = pzip.read_block(&mut reader).expect("failed to read block");
         assert_eq!(block2, b" world");
+    }
+
+    #[test]
+    fn test_block_iter() {
+        let data = hex::decode(TEST_DATA).unwrap();
+        let mut reader = io::BufReader::new(&data[..]);
+        let mut pzip = PZip::from(&mut reader, b"pzip").expect("failed to read header");
+        let mut plaintext = Vec::<u8>::with_capacity(11);
+        for block in pzip.blocks(&mut reader) {
+            plaintext.extend(block);
+        }
+        assert_eq!(plaintext, b"hello world");
     }
 }
