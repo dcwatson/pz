@@ -58,7 +58,7 @@ impl PZip {
         reader: &'r mut T,
         key_material: &[u8],
     ) -> Result<PZipReader<'r, T>, Error> {
-        let mut buf = [0u8; 36];
+        let mut buf = [0u8; 40];
         reader.read_exact(&mut buf)?;
 
         let mut magic = [0u8; 4];
@@ -93,9 +93,9 @@ impl PZip {
         salt.copy_from_slice(&buf[8..24]);
 
         let iterations = u32::from_be_bytes([buf[24], buf[25], buf[26], buf[27]]);
-
+        // Header bytes 28-31 are reserved for future use.
         let size = u64::from_be_bytes([
-            buf[28], buf[29], buf[30], buf[31], buf[32], buf[33], buf[34], buf[35],
+            buf[32], buf[33], buf[34], buf[35], buf[36], buf[37], buf[38], buf[39]
         ]);
 
         let mut nonce = [0u8; 12];
@@ -174,6 +174,8 @@ impl PZip {
         // KDF salt, iterations
         writer.write_all(&salt)?;
         writer.write_all(&iterations.to_be_bytes())?;
+        // Reserved
+        writer.write_all(&[0, 0, 0, 0])?;
         // File size
         writer.write_all(&size.to_be_bytes())?;
         // Nonce
@@ -378,7 +380,7 @@ mod tests {
     use std::io::Read;
 
     // Test archive from https://github.com/imsweb/pzip
-    const TEST_DATA: &str = "505A49500102200C086F58741C96B2C27A8DA2716422702A00030D40000000000000000B9266AEA55A27210430B6086F000000152D9C7FF9665B9C444C78DA54E0529422035CC1FD930000001682E078BEFEA66C5BA96A066979E8506D27C3610B2F8E";
+    const TEST_DATA: &str = "505A49500102200C086F58741C96B2C27A8DA2716422702A00030D4000000000000000000000000B9266AEA55A27210430B6086F000000152D9C7FF9665B9C444C78DA54E0529422035CC1FD930000001682E078BEFEA66C5BA96A066979E8506D27C3610B2F8E";
 
     #[test]
     fn test_pzip_from() {
