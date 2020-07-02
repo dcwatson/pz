@@ -3,36 +3,49 @@
 //! Streaming example:
 //!
 //! ```
-//! use std::fs::File;
-//! use pzip::{PZip, Password};
+//! use std::io;
+//! use pzip::{PZip, Password, Algorithm, Compression, Error, PZipKey};
 //!
-//! let mut infile = File::open("my_data.txt").unwrap();
-//! let mut outfile = File::create("my_data.txt.pz").unwrap();
-//! let key = Password("secret");
-//! PZip::encrypt_to(
-//!     &mut infile,
-//!     &mut outfile,
-//!     Algorithm::AesGcm256,
-//!     &key,
-//!     Compression::None,
-//! )
+//! fn main() -> Result<(), Error> {
+//!     let plaintext = b"hello world";
+//!     let mut ciphertext = Vec::<u8>::new();
+//!     let mut check = Vec::<u8>::new();
+//!     let key = Password("pzip");
+//!     PZip::encrypt_to(
+//!         &mut io::Cursor::new(plaintext),
+//!         &mut ciphertext,
+//!         Algorithm::AesGcm256,
+//!         &key,
+//!         Compression::None,
+//!     )?;
+//!     PZip::decrypt_to(
+//!         &mut io::Cursor::new(ciphertext),
+//!         &mut check,
+//!         key.material()
+//!     )?;
+//!     assert_eq!(check, plaintext);
+//!     Ok(())
+//! }
 //! ```
 //!
 //! One-shot example:
 //!
 //! ```
-//! use pzip::{PZip, Password};
+//! use pzip::{PZip, Password, Algorithm, Compression, Error, PZipKey};
 //!
-//! let key = Password("secret");
-//! let plaintext = b"hello world";
-//! let ciphertext = PZip::encrypt(
-//!     plaintext,
-//!     Algorithm::AesGcm256,
-//!     &key,
-//!     Compression::None
-//! ).unwrap();
-//! let check = PZip::decrypt(&ciphertext, key.material()).unwrap();
-//! assert_eq!(check, plaintext);
+//! fn main() -> Result<(), Error> {
+//!     let key = Password("secret");
+//!     let plaintext = b"hello world";
+//!     let ciphertext = PZip::encrypt(
+//!         plaintext,
+//!         Algorithm::AesGcm256,
+//!         &key,
+//!         Compression::None
+//!     )?;
+//!     let check = PZip::decrypt(&ciphertext, key.material())?;
+//!     assert_eq!(check, plaintext);
+//!     Ok(())
+//! }
 //! ```
 
 use ring::{aead, error::Unspecified, hkdf, hkdf::KeyType, pbkdf2, rand, rand::SecureRandom};
@@ -870,35 +883,6 @@ mod tests {
         assert_eq!(r.pzip.version, 1);
 
         let check = r.read_block().expect("failed to read block");
-        assert_eq!(check, plaintext);
-    }
-
-    #[test]
-    fn test_one_shot() {
-        let key = Password("pzip");
-        let plaintext = b"hello world";
-        let ciphertext =
-            PZip::encrypt(plaintext, Algorithm::AesGcm256, &key, Compression::None).unwrap();
-        let check = PZip::decrypt(&ciphertext, key.material()).unwrap();
-        assert_eq!(check, plaintext);
-    }
-
-    #[test]
-    fn test_streaming() {
-        let plaintext = b"hello world";
-        let mut ciphertext = Vec::<u8>::new();
-        let mut check = Vec::<u8>::new();
-        let key = Password("pzip");
-        PZip::encrypt_to(
-            &mut io::Cursor::new(plaintext),
-            &mut ciphertext,
-            Algorithm::AesGcm256,
-            &key,
-            Compression::None,
-        )
-        .expect("encrypt failed");
-        PZip::decrypt_to(&mut io::Cursor::new(ciphertext), &mut check, key.material())
-            .expect("decrypt failed");
         assert_eq!(check, plaintext);
     }
 }
