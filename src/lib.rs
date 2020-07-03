@@ -48,10 +48,13 @@
 //! }
 //! ```
 
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use ring::{aead, error::Unspecified, hkdf, hkdf::KeyType, pbkdf2, rand, rand::SecureRandom};
 use std::cmp;
 use std::collections::HashMap;
 use std::io;
+use std::io::Read;
 use std::io::Write;
 use std::num::NonZeroU32;
 
@@ -445,6 +448,30 @@ impl Compression {
             _ => return Err(Error::UnknownCompression(num)),
         })
     }
+
+    pub fn compress(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        Ok(match *self {
+            Compression::None => data.to_vec(),
+            Compression::Gzip => {
+                let compressed = Vec::<u8>::new();
+                let mut gz = GzEncoder::new(compressed, flate2::Compression::default());
+                gz.write_all(data)?;
+                gz.finish()?
+            }
+        })
+    }
+
+    pub fn decompress(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        Ok(match *self {
+            Compression::None => data.to_vec(),
+            Compression::Gzip => {
+                let mut gz = GzDecoder::new(&data[..]);
+                let mut decompressed = Vec::<u8>::new();
+                gz.read_to_end(&mut decompressed)?;
+                decompressed
+            }
+        })
+    }
 }
 
 /// Structure for holding information about a PZip archive, and a namespace for common operations.
@@ -650,12 +677,16 @@ impl<'a, T: io::Read> PZipReader<'a, T> {
         let mut block = vec![0u8; size as usize];
         self.reader.read_exact(&mut block)?;
 
-        let plaintext = self.pzip.algorithm.decrypt(
-            &self.pzip.key,
-            &mut block,
-            &self.pzip.tags,
-            self.counter,
-        )?;
+        let plaintext = self
+            .pzip
+            .compression
+            .decompress(&self.pzip.algorithm.decrypt(
+                &self.pzip.key,
+                &mut block,
+                &self.pzip.tags,
+                self.counter,
+            )?)?;
+
         self.counter += 1;
 
         Ok(plaintext)
@@ -738,10 +769,12 @@ impl<'a, T: io::Write> PZipWriter<'a, T> {
             self.write_header()?;
         }
 
-        let mut ciphertext =
-            self.pzip
-                .algorithm
-                .encrypt(&self.pzip.key, &block, &self.pzip.tags, self.counter)?;
+        let mut ciphertext = self.pzip.algorithm.encrypt(
+            &self.pzip.key,
+            &self.pzip.compression.compress(&block)?,
+            &self.pzip.tags,
+            self.counter,
+        )?;
 
         let mut header = ciphertext.len() as u32;
         if last {
@@ -872,7 +905,7 @@ mod tests {
         let mut buf = Vec::<u8>::new();
         let plaintext = b"hello world";
         let key = Password("pzip");
-        let mut w = PZip::writer(&mut buf, Algorithm::AesGcm256, &key, Compression::None)
+        let mut w = PZip::writer(&mut buf, Algorithm::AesGcm256, &key, Compression::Gzip)
             .expect("failed to write header");
         w.write_block(plaintext).expect("failed to write block");
         w.finalize().expect("failed to finalize");

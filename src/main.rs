@@ -44,7 +44,7 @@ fn main() {
                 &mut outfile,
                 Algorithm::AesGcm256,
                 &key,
-                Compression::None,
+                Compression::Gzip,
             )
             .expect("error encrypting");
         }
