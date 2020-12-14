@@ -8,10 +8,10 @@ description = "Rust library and CLI for the PZip encrypted file format."
 repository = "https://github.com/dcwatson/pz"
 
 [dependencies]
-clap = "2.33"
+clap = "2"
 hex = "0.4"
-ring = "0.16"
-flate2 = "1.0"
+ring = "0.17.0-alpha.8"
+libdeflater = "0.7"
 
 [lib]
 name = "pzip"

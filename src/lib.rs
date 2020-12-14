@@ -48,13 +48,12 @@
 //! }
 //! ```
 
-use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
+use libdeflater::{CompressionLvl, Compressor, Decompressor};
 use ring::{aead, error::Unspecified, hkdf, hkdf::KeyType, pbkdf2, rand, rand::SecureRandom};
 use std::cmp;
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::io;
-use std::io::Read;
 use std::io::Write;
 use std::num::NonZeroU32;
 
@@ -89,11 +88,27 @@ pub enum Error {
     NoMoreBlocks,
     /// Wrapper for `ring::error::Unspecified`.
     CryptoError(Unspecified),
+    /// libdeflater compression error.
+    CompressionError(libdeflater::CompressionError),
+    /// libdeflater decompression error.
+    DecompressionError(libdeflater::DecompressionError),
 }
 
 impl From<io::Error> for Error {
     fn from(error: io::Error) -> Self {
         Error::IoError(error)
+    }
+}
+
+impl From<libdeflater::CompressionError> for Error {
+    fn from(error: libdeflater::CompressionError) -> Self {
+        Error::CompressionError(error)
+    }
+}
+
+impl From<libdeflater::DecompressionError> for Error {
+    fn from(error: libdeflater::DecompressionError) -> Self {
+        Error::DecompressionError(error)
     }
 }
 
@@ -178,7 +193,6 @@ pub fn derive_nonce(base: &[u8], counter: u32) -> Result<aead::Nonce, Error> {
 }
 
 fn read_int(bytes: &[u8]) -> Result<u64, Error> {
-    use std::convert::TryInto;
     Ok(match bytes.len() {
         1 => bytes[0] as u64,
         2 => u16::from_be_bytes(bytes[0..2].try_into().unwrap()) as u64,
@@ -453,10 +467,12 @@ impl Compression {
         Ok(match *self {
             Compression::None => data.to_vec(),
             Compression::Gzip => {
-                let compressed = Vec::<u8>::new();
-                let mut gz = GzEncoder::new(compressed, flate2::Compression::default());
-                gz.write_all(data)?;
-                gz.finish()?
+                let mut gz = Compressor::new(CompressionLvl::default());
+                let max_size = gz.gzip_compress_bound(data.len());
+                let mut compressed = vec![0u8; max_size];
+                let actual = gz.gzip_compress(data, &mut compressed)?;
+                compressed.truncate(actual);
+                compressed
             }
         })
     }
@@ -465,9 +481,12 @@ impl Compression {
         Ok(match *self {
             Compression::None => data.to_vec(),
             Compression::Gzip => {
-                let mut gz = GzDecoder::new(&data[..]);
-                let mut decompressed = Vec::<u8>::new();
-                gz.read_to_end(&mut decompressed)?;
+                let mut gz = Decompressor::new();
+                // Read the gzip original data size to figure out how much to allocate.
+                let n = data.len() - 4;
+                let orig_size = u16::from_le_bytes(data[n..n + 2].try_into().unwrap());
+                let mut decompressed = vec![0u8; orig_size as usize];
+                gz.gzip_decompress(data, &mut decompressed)?;
                 decompressed
             }
         })
