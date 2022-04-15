@@ -1,17 +1,20 @@
 [package]
 name = "pzip"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Dan Watson <dcwatson@gmail.com>"]
-edition = "2018"
+edition = "2021"
 license = "MIT"
 description = "Rust library and CLI for the PZip encrypted file format."
+homepage = "http://pzip.org"
 repository = "https://github.com/dcwatson/pz"
 
 [dependencies]
-clap = "2"
-hex = "0.4"
-ring = "0.17.0-alpha.8"
-libdeflater = "0.7"
+clap = "~3"
+ring = "0.17.0-alpha.11"
+libdeflater = "~0.8"
+
+[dev-dependencies]
+hex = "~0.4"
 
 [lib]
 name = "pzip"

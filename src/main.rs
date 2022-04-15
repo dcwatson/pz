@@ -1,27 +1,27 @@
 extern crate clap;
 
-use clap::{App, Arg};
+use clap::{Command, Arg};
 use pzip::{Algorithm, Compression, PZip, Password};
 use std::fs::{remove_file, File};
 
 fn main() {
-    let matches = App::new("pz")
+    let matches = Command::new("pz")
         .version("1.0")
         .author("Dan Watson <dcwatson@gmail.com>")
         .about("CLI for encrypting/decrypting PZip files.")
         .arg(
-            Arg::with_name("auto")
-                .short("a")
+            Arg::new("auto")
+                .short('a')
                 .help("Automatically generate an encryption password"),
         )
         .arg(
-            Arg::with_name("password")
-                .short("p")
+            Arg::new("password")
+                .short('p')
                 .takes_value(true)
                 .help("Password for decryption"),
         )
-        .arg(Arg::with_name("keep").short("k").help("Keep input files"))
-        .arg(Arg::with_name("FILE").multiple(true))
+        .arg(Arg::new("keep").short('k').help("Keep input files"))
+        .arg(Arg::new("FILE").multiple_values(true))
         .get_matches();
     let keep = matches.occurrences_of("keep") > 0;
     let password = matches
